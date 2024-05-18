@@ -1,0 +1,395 @@
+---
+title: "FA_AutomobileCompanies"
+author: "Kajori De"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  markdown:
+    wrap: 75
+  html_document:
+    df_print: paged
+---
+
+```{r echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = TRUE, warning = FALSE)
+```
+
+## Introduction
+
+This report analyzes the financial performance of four publicly traded
+companies: Ford (F), General Motors (GM), Tesla (TSLA), and Toyota Motors
+(TM), over the past year. The analysis focuses on daily stock returns, risk
+measures, and comparisons to the S&P 500 Index (\^GSPC).
+
+## Load packages
+
+Packages - The necessary libraries are loaded, including quantmod for
+retrieving financial data, ggplot2 for data visualization, reshape2 and
+dplyr for data manipulation, zoo for time series data, plotly for
+interactive plots, knitr and rmarkdown for report generation.
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(quantmod)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(zoo)
+library(plotly)
+library(hrbrthemes)
+```
+
+## Data Retrieval
+
+Financial data for the specified companies and the S&P 500 index is
+retrieved from Yahoo Finance using the `quantmod` package. The data covers
+a one-year period ending on the current date.
+
+```{r}
+# Define companies to analyze
+companies <- c("F", "GM", "TSLA", "TM")
+start_date <- Sys.Date() - 365
+end_date <- Sys.Date()
+
+# Retrieve data for companies and market index
+getSymbols(companies, src = "yahoo", from = start_date, to = end_date)
+getSymbols("^GSPC", src = "yahoo", from = start_date, to = end_date)
+```
+
+## Financial Analysis
+
+### Daily Returns
+
+-   Daily returns represent the percentage change in a stock's price from
+    one day to the next. Positive values indicate a price increase, while
+    negative values indicate a decrease.
+
+-   They are calculated using the logarithmic difference of consecutive
+    adjusted closing prices (`diff(log(stock_data))`). This approach
+    provides a percentage change rather than the absolute difference. Each
+    company's daily return is stored in a separate data frame named after
+    the company symbol with the suffix `.Ret`.
+
+-   A 7-day rolling mean is applied to each company's return series using
+    `rollapply` to smooth out short-term fluctuations and highlight
+    underlying trends. Smoothing the data with a rolling mean helps
+    visualize the general trend in returns and reduces the impact of daily
+    market noise.
+
+```{r}
+# Calculate daily returns and handle missing data
+for (company in companies) {
+  stock_data <- get(company)
+  stock_data <- na.omit(stock_data)
+  stock_data <- stock_data[, paste0(company, ".Adjusted")]
+  stock_data <- diff(log(stock_data))
+  colnames(stock_data) <- paste0(company, ".Ret")
+  assign(company, stock_data)
+}
+
+# Calculate S&P 500 returns
+GSPC <- na.omit(GSPC)
+GSPC <- GSPC[, "GSPC.Adjusted"]
+GSPC <- diff(log(GSPC))
+colnames(GSPC) <- "GSPC.Ret"
+
+# Combine returns into a single data frame
+returns_data <- na.omit(merge(F, GM, TSLA, TM, GSPC))
+
+# Convert to data.frame for manipulation
+returns_data_df <- data.frame(Date = index(returns_data), coredata(returns_data))
+
+# Apply smoothing (7-day rolling mean)
+returns_data_smooth <- returns_data_df %>%
+  mutate(across(-Date, ~ rollapply(.x, width = 7, FUN = mean, fill = NA, align = "right")))
+
+# Convert back to xts
+returns_data_smooth_xts <- xts(returns_data_smooth[, -1], order.by = returns_data_smooth$Date)
+
+# Interactive Smoothed Daily Returns
+
+returns_long_smooth <- as.data.frame(returns_data_smooth_xts)
+returns_long_smooth$Date <- index(returns_data_smooth_xts)
+returns_long_smooth <- melt(returns_long_smooth, id.vars = "Date")
+
+dailyreturns_graph <- ggplot(returns_long_smooth, aes(x = Date, y = value, color = variable)) +
+  geom_line() +
+  labs(
+    title = "Smoothed Daily Returns (7-day Rolling Mean)",
+    x = "Date", y = "Return", color = "Company"
+  ) +
+  theme_ipsum()
+
+ggplotly(dailyreturns_graph)
+```
+
+### Capital Asset Pricing Model (CAPM)
+
+The CAPM estimates the expected return of an asset based on its systematic
+risk (beta) relative to the market. A CAPM regression is performed for each
+company using the `lm` function. The regression model is: Company Return \~
+Market Return, where the market return is represented by the S&P 500 daily
+return (`GSPC.Ret`).
+
+```{r}
+capm_results <- list()
+for (company in companies) {
+  formula <- as.formula(paste0(company, ".Ret ~ GSPC.Ret"))
+  capm_model <- lm(formula, data = returns_data)
+  capm_results[[company]] <- summary(capm_model)
+}
+```
+
+### Beta Coefficient
+
+Beta indicates how much a company's returns move relative to the market
+(S&P 500). A beta of 1 suggests the company's returns mirror the market,
+while a beta greater than 1 indicates higher volatility compared to the
+market.
+
+```{r}
+beta_coefficient <- sapply(companies, function(company) {
+  capm_results[[company]]$coefficients["GSPC.Ret", "Estimate"]
+})
+```
+
+### Sharpe Ratio
+
+The Sharpe Ratio is a risk-adjusted performance measure. It calculates the
+excess return (return above the risk-free rate) per unit of risk (standard
+deviation of return). A higher Sharpe Ratio indicates better risk-adjusted
+performance. I assume a risk-free rate of 1% per year, converted to daily
+basis (0.01 / 252).
+
+```{r}
+# Sharpe Ratios
+risk_free_rate <- 0.01 / 252 # Assume 1% annual risk-free rate, converted to daily
+sharpe_ratios <- sapply(companies, function(company) {
+  column_name <- paste0(company, ".Ret")
+  mean_return <- mean(returns_data[, column_name], na.rm = TRUE)
+  sd_return <- sd(returns_data[, column_name], na.rm = TRUE)
+  (mean_return - risk_free_rate) / sd_return
+})
+```
+
+### Interpreting Beta Coefficient and Sharpe Ratio
+
+The beta_sharpe_table summarizes the beta coefficient and sharpe ratio for
+each company.
+
+Tesla offers the potential for higher returns but comes with significantly
+more risk. Toyota Motors appears to be the most conservative option with
+lower volatility but also potentially lower returns. General Motors and
+Ford seem to fall somewhere in between, with General Motors being closer to
+the market's volatility and F being a bit more volatile.
+
+[Caveat]{.underline} - This analysis is based on a limited timeframe (one
+year) and specific assumptions (risk-free rate). Other factors beyond beta
+and Sharpe Ratio can influence investment decisions.
+
+```{r}
+beta_sharpe_table <- data.frame(
+  Company = companies,
+  Beta_Coefficient = round(beta_coefficient, 2),
+  Sharpe_Ratio = round(sharpe_ratios, 2)
+)
+
+beta_sharpe_table
+
+
+beta_sharpe_graph <- ggplot(beta_sharpe_table, aes(x = Company)) +
+  geom_bar(aes(y = Beta_Coefficient),
+    stat = "identity", fill = "cornsilk3", alpha = 0.7
+  ) +
+  geom_point(aes(y = Sharpe_Ratio * 10),
+    color = "darkcyan", size = 4
+  ) +
+  labs(
+    title = "Beta Coefficients and Sharpe Ratios",
+    x = "Company", y = "Value"
+  ) +
+  scale_y_continuous(sec.axis = sec_axis(~ . / 10, name = "Sharpe Ratio")) +
+  theme_ipsum()
+
+beta_sharpe_graph
+```
+
+### Security Market Line (SML)
+
+The SML depicts the expected relationship between a stock's beta
+coefficient and its Sharpe Ratio. Its slope represents the market risk
+premium, which is the additional return investors expect for taking on more
+risk (higher beta) compared to the risk-free rate. Stocks plotting above
+the SML are considered to have potentially better risk-adjusted returns,
+while those below may be less attractive.
+
+As can be seen in the graph, Toyota and General Motors better risk-adjusted
+returns while Tesla and Ford do not.
+
+```{r}
+# Security Market Line (SML)
+sml_plot <- ggplot(data = beta_sharpe_table, aes(x = Beta_Coefficient, y = Sharpe_Ratio, color = Company)) +
+  geom_point(size = 4) +
+  geom_abline(
+    intercept = 0, slope = max(beta_sharpe_table$Sharpe_Ratio) / max(beta_sharpe_table$Beta_Coefficient),
+    color = "navyblue"
+  ) +
+  labs(
+    title = "Security Market Line (SML)",
+    x = "Beta Coefficient",
+    y = "Sharpe Ratio",
+    color = "Company"
+  ) +
+  theme_ipsum()
+
+sml_plot
+```
+
+### Hypothesis Testing
+
+The t-test is used to compare the returns of each stock with the S&P 500
+index to determine if there is a statistically significant difference.
+
+Companies with p-values below a certain threshold (e.g., 0.05) are
+considered to have significantly different returns compared to the market.
+
+**Ford, General Motors, and Tesla** have high p-values (greater than 0.05).
+This suggests we **fail to reject the null hypothesis**. In other words,
+there is **not enough evidence** to conclude that the average daily returns
+of Ford, General Motors, and Tesla are statistically different from the S&P
+500's return at the 5% significance level.
+
+Whereas **Toyota** has a higher t-statistic (positive) and a p-value
+approaching 0.5. While not statistically significant at the 5% level, the
+positive t-statistic might indicate a trend for Toyota's average daily
+return to be slightly higher than the S&P 500's return.
+
+[Caveat]{.underline} - While the t-tests don't reveal statistically
+significant differences, this doesn't necessarily imply the returns are
+identical. There might be smaller differences that aren't statistically
+significant with this sample size. These results are based on daily returns
+over a one-year period. Looking at longer timeframes or different time
+periods could yield different conclusions.
+
+```{r}
+# t-tests comparing returns
+t_tests <- lapply(companies, function(company) {
+  column_name <- paste0(company, ".Ret")
+  t_result <- t.test(returns_data[, column_name], returns_data$GSPC.Ret)
+  list(
+    t_statistic = t_result$statistic,
+    p_value = t_result$p.value,
+    CI_lower = t_result$conf.int[1],
+    CI_upper = t_result$conf.int[2]
+  )
+})
+
+# data frame from the results
+t_tests_df <- do.call(rbind, t_tests)
+rownames(t_tests_df) <- companies
+colnames(t_tests_df) <- c("t_statistic", "p_value", "CI_lower", "CI_upper")
+
+t_tests_df
+```
+
+The box plots visually represent the distribution of daily returns for each
+company. The center line within the box represents the median return, while
+the box encompasses the middle 50% of the data. The whiskers extend to the
+most extreme data points within 1.5 times the interquartile range from the
+box. Outliers are shown as individual points beyond the whiskers.
+
+As can be seen in the graph, Tesla shows the widest range of returns,
+indicating high volatility. Toyota Motors exhibits the most stable returns,
+with the smallest interquartile range. Ford and General Motors have similar
+distributions, with some outliers, suggesting moderate volatility compared
+to Tesla and Toyota.
+
+```{r}
+returns_long <- returns_data_df %>%
+  select(-Date) %>%
+  pivot_longer(cols = everything(), names_to = "Company", values_to = "Return")
+
+t_tests_plots <- ggplot(
+  returns_long,
+  aes(x = Company, y = Return, fill = Company)
+) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Box Plot of Daily Returns for Each Company",
+    x = "Company", y = "Daily Return"
+  ) +
+  theme_ipsum() +
+  theme(legend.position = "none")
+
+t_tests_plots
+```
+
+### Value at Risk (VaR)
+
+VaR estimates the potential loss in value of an asset or portfolio over a
+defined period for a given confidence interval. In this code, the 1-day VaR
+at the 95% confidence level is calculated by determining the quantile of
+the daily returns distribution that corresponds to the worst 5% of
+outcomes.
+
+The 1-day 95% VaR for Ford is -3.32%, meaning there is a 5% chance that
+Ford's stock could lose more than 3.32% of its value in one day. Tesla has
+the highest VaR at -4.78%, indicating the greatest potential for daily loss
+among the companies analyzed, while Toyota has the lowest VaR at -2.41%,
+suggesting the least risk.
+
+```{r}
+# VaR calculation function
+calculate_var <- function(returns, confidence_level = 0.95) {
+  quantile(returns, probs = 1 - confidence_level, na.rm = TRUE)
+}
+
+# Calculate VaR for each company
+var_95 <- sapply(companies, function(company) {
+  column_name <- paste0(company, ".Ret")
+  calculate_var(returns_data[, column_name], confidence_level = 0.95)
+})
+
+# Remove names from var_95
+var_95 <- unname(var_95)
+
+# Create a data frame for VaR results
+var_results <- data.frame(
+  Company = companies,
+  VaR_95 = round(var_95, 4)
+)
+
+# Print VaR results
+print(var_results)
+```
+
+The bar chart below shows the 1-day 95% VaR for each company. Here, a
+higher bar signifies greater potential daily downside risk. Tesla has the
+highest VaR, suggesting the most significant potential loss, while Toyota
+exhibits the lowest VaR, implying the least risk.
+
+```{r}
+var_plot <- ggplot(var_results, aes(x = Company, y = VaR_95, fill = Company)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Value at Risk (VaR) at 95% Confidence Level",
+    x = "Company", y = "VaR"
+  ) +
+  theme_ipsum()
+
+var_plot
+```
+
+## Assumptions and Limitations
+
+-   This analysis is based on historical data over a one-year period and
+    assumes the accuracy of the data retrieved from Yahoo Finance.
+
+-   The risk-free rate is assumed to be 1% per year for illustrative
+    purposes.
+
+-   The chosen financial metrics and tests provide insights but may not
+    capture all aspects of investment risk.
+
+-   The results may not be generalizable to different timeframes or
+    economic conditions.
